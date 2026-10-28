@@ -1,16 +1,17 @@
 import json
-import os
 import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 HOST = "127.0.0.1"
 PORT = 8000
 MAX_BYTES = 10 * 1024 * 1024
 INTERNAL_TOKEN = "local-lab-token-change-me"
+PROJECT_DIR = Path(__file__).resolve().parent
 
 STORAGE_SERVERS = [
     "http://127.0.0.1:8001",
@@ -18,21 +19,30 @@ STORAGE_SERVERS = [
     "http://127.0.0.1:8003",
 ]
 
-# DEMO ACCOUNTS ONLY. Do not use these credentials in a real deployment.
+# Educational demo accounts only. Do not use these credentials in production.
 USERS = {
     "ituser": {"password": "it123", "department": "IT"},
     "financeuser": {"password": "fin123", "department": "FINANCE"},
     "adminuser": {"password": "admin123", "department": "ADMIN"},
 }
+ALLOWED_DEPARTMENTS = {"IT", "FINANCE", "ADMIN"}
 SESSIONS = {}  # In-memory sessions; restarting the coordinator logs everyone out.
 
 
 def valid_filename(name):
-    return bool(name) and name not in (".", "..") and "/" not in name and "\\" not in name and len(name) <= 150
+    return (
+        bool(name)
+        and name not in (".", "..")
+        and "/" not in name
+        and "\\" not in name
+        and len(name) <= 150
+    )
 
 
 def request_json(url, method="GET", body=None, headers=None, timeout=2):
-    req = urllib.request.Request(url, data=body, headers=headers or {}, method=method)
+    req = urllib.request.Request(
+        url, data=body, headers=headers or {}, method=method
+    )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         raw = response.read()
         return response.status, json.loads(raw.decode("utf-8")) if raw else {}
@@ -45,7 +55,9 @@ def storage_upload(server, key, content):
         "Content-Type": "application/octet-stream",
         "Content-Length": str(len(content)),
     }
-    req = urllib.request.Request(server + "/upload", data=content, headers=headers, method="POST")
+    req = urllib.request.Request(
+        server + "/upload", data=content, headers=headers, method="POST"
+    )
     with urllib.request.urlopen(req, timeout=3) as response:
         return response.status
 
@@ -70,7 +82,10 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
     def send_bytes(self, content, filename):
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Disposition", "attachment; filename*=UTF-8''" + urllib.parse.quote(filename))
+        self.send_header(
+            "Content-Disposition",
+            "attachment; filename*=UTF-8''" + urllib.parse.quote(filename),
+        )
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -88,7 +103,7 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/":
             try:
-                with open("client.html", "rb") as f:
+                with open(PROJECT_DIR / "client.html", "rb") as f:
                     content = f.read()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -96,36 +111,60 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 self.wfile.write(content)
             except OSError:
-                self.send_json(500, {"error": "client.html not found. Run coordinator.py from the project folder."})
+                self.send_json(
+                    500,
+                    {
+                        "error": (
+                            "client.html not found. Put client.html in the same "
+                            "folder as coordinator.py."
+                        )
+                    },
+                )
             return
 
         if parsed.path == "/api/health":
-            status = []
-            for server in STORAGE_SERVERS:
+            statuses = []
+            for storage_server in STORAGE_SERVERS:
                 try:
-                    _, data = request_json(server + "/health", timeout=1)
-                    status.append({"server": server, "status": data.get("status", "unknown")})
+                    _, data = request_json(storage_server + "/health", timeout=1)
+                    statuses.append(
+                        {
+                            "server": storage_server,
+                            "status": data.get("status", "unknown"),
+                        }
+                    )
                 except Exception:
-                    status.append({"server": server, "status": "unavailable"})
-            self.send_json(200, {"coordinator": "running", "storage_servers": status})
+                    statuses.append(
+                        {"server": storage_server, "status": "unavailable"}
+                    )
+            self.send_json(
+                200,
+                {"coordinator": "running", "storage_servers": statuses},
+            )
             return
 
         if parsed.path == "/api/files":
             user = self.require_user()
             if not user:
                 return
-            department = query.get("department", [""])[0].upper()
-            if department != user["department"]:
-                self.send_json(403, {"error": "You can access only your own department."})
+
+            # Department is determined by the authenticated account, not trusted
+            # from a value supplied by the browser.
+            department = user["department"]
+            requested_department = query.get("department", [department])[0].upper()
+            if requested_department != department:
+                self.send_json(
+                    403, {"error": "You can access only your own department."}
+                )
                 return
 
             key_prefix = department + "__"
             found = set()
             available_servers = 0
-            for server in STORAGE_SERVERS:
+            for storage_server in STORAGE_SERVERS:
                 try:
                     _, data = request_json(
-                        server + "/files",
+                        storage_server + "/files",
                         headers={"X-Internal-Token": INTERNAL_TOKEN},
                         timeout=2,
                     )
@@ -137,35 +176,54 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                     pass
 
             if available_servers == 0:
-                self.send_json(503, {"error": "All storage servers are unavailable."})
+                self.send_json(
+                    503, {"error": "All storage servers are unavailable."}
+                )
                 return
-            self.send_json(200, {"department": department, "files": sorted(found), "replica_servers_checked": available_servers})
+
+            self.send_json(
+                200,
+                {
+                    "department": department,
+                    "files": sorted(found),
+                    "replica_servers_checked": available_servers,
+                },
+            )
             return
 
         if parsed.path == "/api/download":
             user = self.require_user()
             if not user:
                 return
-            department = query.get("department", [""])[0].upper()
+
+            department = user["department"]
+            requested_department = query.get("department", [department])[0].upper()
             filename = query.get("filename", [""])[0]
-            if department != user["department"]:
-                self.send_json(403, {"error": "You can access only your own department."})
+            if requested_department != department:
+                self.send_json(
+                    403, {"error": "You can access only your own department."}
+                )
                 return
             if not valid_filename(filename):
                 self.send_json(400, {"error": "Invalid filename"})
                 return
 
             key = department + "__" + filename
-            for server in STORAGE_SERVERS:
-                url = server + "/download/" + urllib.parse.quote(key)
-                req = urllib.request.Request(url, headers={"X-Internal-Token": INTERNAL_TOKEN})
+            for storage_server in STORAGE_SERVERS:
+                url = storage_server + "/download/" + urllib.parse.quote(key)
+                req = urllib.request.Request(
+                    url, headers={"X-Internal-Token": INTERNAL_TOKEN}
+                )
                 try:
                     with urllib.request.urlopen(req, timeout=3) as response:
                         self.send_bytes(response.read(), filename)
                         return
                 except Exception:
                     continue
-            self.send_json(404, {"error": "File not found on any available storage server."})
+
+            self.send_json(
+                404, {"error": "File not found on any available storage server."}
+            )
             return
 
         self.send_json(404, {"error": "Unknown endpoint"})
@@ -181,20 +239,49 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
                     self.send_json(400, {"error": "Invalid login request"})
                     return
                 data = json.loads(self.rfile.read(size).decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise ValueError("JSON body must be an object")
             except Exception:
-                self.send_json(400, {"error": "Send a valid JSON login request."})
+                self.send_json(
+                    400, {"error": "Send a valid JSON login request."}
+                )
                 return
 
-            username = str(data.get("username", ""))
+            username = str(data.get("username", "")).strip()
             password = str(data.get("password", ""))
             account = USERS.get(username)
-            if not account or not secrets.compare_digest(password, account["password"]):
-                self.send_json(401, {"error": "Invalid username or password."})
+
+            if not account or not secrets.compare_digest(
+                password, account["password"]
+            ):
+                self.send_json(
+                    401, {"error": "Invalid username or password."}
+                )
+                return
+
+            # Validate the department stored in the account. The browser does not
+            # need to send a department during login.
+            department = account.get("department", "")
+            if department not in ALLOWED_DEPARTMENTS:
+                self.send_json(
+                    500,
+                    {"error": "Invalid department configured for this account."},
+                )
                 return
 
             token = secrets.token_urlsafe(32)
-            SESSIONS[token] = {"username": username, "department": account["department"]}
-            self.send_json(200, {"token": token, "username": username, "department": account["department"]})
+            SESSIONS[token] = {
+                "username": username,
+                "department": department,
+            }
+            self.send_json(
+                200,
+                {
+                    "token": token,
+                    "username": username,
+                    "department": department,
+                },
+            )
             return
 
         if parsed.path == "/api/logout":
@@ -209,10 +296,14 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             if not user:
                 return
 
-            department = query.get("department", [""])[0].upper()
+            # Always use the department tied to the authenticated session.
+            department = user["department"]
+            requested_department = query.get("department", [department])[0].upper()
             filename = query.get("filename", [""])[0]
-            if department != user["department"]:
-                self.send_json(403, {"error": "You can upload only to your own department."})
+            if requested_department != department:
+                self.send_json(
+                    403, {"error": "You can upload only to your own department."}
+                )
                 return
             if not valid_filename(filename):
                 self.send_json(400, {"error": "Invalid filename"})
@@ -223,8 +314,11 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self.send_json(400, {"error": "Invalid content length"})
                 return
+
             if size < 1 or size > MAX_BYTES:
-                self.send_json(400, {"error": "File must be between 1 byte and 10 MB."})
+                self.send_json(
+                    400, {"error": "File must be between 1 byte and 10 MB."}
+                )
                 return
 
             content = self.rfile.read(size)
@@ -235,26 +329,35 @@ class CoordinatorHandler(BaseHTTPRequestHandler):
             key = department + "__" + filename
             successful = []
             failed = []
-            for server in STORAGE_SERVERS:
+            for storage_server in STORAGE_SERVERS:
                 try:
-                    storage_upload(server, key, content)
-                    successful.append(server)
+                    storage_upload(storage_server, key, content)
+                    successful.append(storage_server)
                 except Exception:
-                    failed.append(server)
+                    failed.append(storage_server)
 
             if not successful:
-                self.send_json(503, {"error": "Upload failed: all storage servers are unavailable."})
+                self.send_json(
+                    503,
+                    {"error": "Upload failed: all storage servers are unavailable."},
+                )
                 return
 
-            self.send_json(201, {
-                "message": "Upload successful",
-                "department": department,
-                "filename": filename,
-                "replicas_written": len(successful),
-                "successful_servers": successful,
-                "unavailable_servers": failed,
-                "note": "The file is replicated to every storage server that was available."
-            })
+            self.send_json(
+                201,
+                {
+                    "message": "Upload successful",
+                    "department": department,
+                    "filename": filename,
+                    "replicas_written": len(successful),
+                    "successful_servers": successful,
+                    "unavailable_servers": failed,
+                    "note": (
+                        "The file is replicated to every storage server "
+                        "that was available."
+                    ),
+                },
+            )
             return
 
         self.send_json(404, {"error": "Unknown endpoint"})
