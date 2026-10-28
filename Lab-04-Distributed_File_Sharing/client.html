@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Distributed File Sharing System</title>
+<style>
+  :root { font-family: Arial, sans-serif; color: #172033; background: #f3f6fb; }
+  body { margin: 0; }
+  header { background: #173b6c; color: white; padding: 22px 16px; }
+  header h1 { margin: 0 0 6px; font-size: 1.55rem; }
+  header p { margin: 0; opacity: .9; }
+  main { max-width: 900px; margin: 22px auto; padding: 0 14px 30px; }
+  .card { background: white; border: 1px solid #dce3ee; border-radius: 12px; padding: 18px; margin-bottom: 16px; box-shadow: 0 3px 10px #15294b0a; }
+  h2 { margin-top: 0; font-size: 1.15rem; }
+  label { display: block; margin: 10px 0 5px; font-weight: 600; }
+  input, select, button { font: inherit; }
+  input[type=text], input[type=password], input[type=file], select { width: 100%; box-sizing: border-box; padding: 10px; border: 1px solid #bcc8d9; border-radius: 7px; background: white; }
+  button { background: #1769aa; color: white; border: 0; border-radius: 7px; padding: 10px 14px; cursor: pointer; margin-top: 12px; }
+  button.secondary { background: #4b596d; }
+  button:disabled { opacity: .55; cursor: wait; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .muted { color: #59677b; font-size: .92rem; }
+  #message { padding: 12px; border-radius: 8px; margin-bottom: 14px; display: none; white-space: pre-wrap; overflow-wrap: anywhere; }
+  #message.ok { display: block; background: #e4f6ea; color: #14532d; }
+  #message.err { display: block; background: #fde8e7; color: #8c1d18; }
+  #app { display: none; }
+  #files { padding-left: 20px; }
+  #files li { margin: 8px 0; overflow-wrap: anywhere; }
+  .status { font-family: Consolas, monospace; font-size: .9rem; white-space: pre-wrap; }
+  footer { color: #667085; font-size: .85rem; text-align: center; padding: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Distributed File Sharing System</h1>
+  <p>Distributed Systems Management practical lab</p>
+</header>
+<main>
+  <div id="message" role="status"></div>
+
+  <section id="login" class="card">
+    <h2>Sign in</h2>
+    <p class="muted">Use the demo account for your department.</p>
+    <form id="loginForm">
+      <label for="username">Username</label>
+      <input id="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p class="muted">IT: ituser / it123 · Finance: financeuser / fin123 · Administration: adminuser / admin123</p>
+  </section>
+
+  <section id="app">
+    <div class="card">
+      <strong id="welcome"></strong>
+      <p class="muted">Your account can access only its assigned department.</p>
+      <button id="logout" class="secondary">Log out</button>
+      <button id="health" class="secondary">Check server status</button>
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Upload a file</h2>
+        <form id="uploadForm">
+          <label for="uploadFile">Choose a file (max 10 MB)</label>
+          <input id="uploadFile" type="file" required>
+          <button type="submit">Upload and replicate</button>
+        </form>
+        <p class="muted">The system writes a copy to each storage server that is available.</p>
+      </section>
+
+      <section class="card">
+        <h2>Stored files</h2>
+        <button id="refresh">Refresh file list</button>
+        <ul id="files"><li class="muted">Click Refresh file list.</li></ul>
+      </section>
+    </div>
+  </section>
+  <footer>Educational demonstration only. Do not use demo credentials or this HTTP setup for real confidential files.</footer>
+</main>
+<script>
+let token = "";
+let department = "";
+
+function showMessage(text, kind = "ok") {
+  const box = document.getElementById("message");
+  box.textContent = text;
+  box.className = kind;
+}
+async function api(url, options = {}) {
+  options.headers = options.headers || {};
+  if (token) options.headers["Authorization"] = "Bearer " + token;
+  const response = await fetch(url, options);
+  const type = response.headers.get("content-type") || "";
+  if (!response.ok) {
+    let message = "Request failed (" + response.status + ")";
+    try {
+      const body = type.includes("application/json") ? await response.json() : {error: await response.text()};
+      message = body.error || message;
+    } catch (_) {}
+    throw new Error(message);
+  }
+  return response;
+}
+
+document.getElementById("loginForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const response = await fetch("/api/login", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        username: document.getElementById("username").value.trim(),
+        password: document.getElementById("password").value
+      })
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Login failed");
+    token = data.token;
+    department = data.department;
+    document.getElementById("login").style.display = "none";
+    document.getElementById("app").style.display = "block";
+    document.getElementById("welcome").textContent = "Signed in as " + data.username + " — " + department;
+    showMessage("Login successful.");
+    loadFiles();
+  } catch (error) {
+    showMessage(error.message, "err");
+  }
+});
+
+document.getElementById("uploadForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const file = document.getElementById("uploadFile").files[0];
+  if (!file) return;
+  if (file.size < 1 || file.size > 10 * 1024 * 1024) {
+    showMessage("Choose a non-empty file no larger than 10 MB.", "err");
+    return;
+  }
+  try {
+    const response = await api("/api/upload?department=" + encodeURIComponent(department) + "&filename=" + encodeURIComponent(file.name), {
+      method: "POST",
+      headers: {"Content-Type": "application/octet-stream"},
+      body: file
+    });
+    const data = await response.json();
+    showMessage("Upload successful: " + data.filename + "\nReplicas written: " + data.replicas_written + "\nAvailable servers: " + data.successful_servers.join(", ") + (data.unavailable_servers.length ? "\nUnavailable: " + data.unavailable_servers.join(", ") : ""));
+    document.getElementById("uploadForm").reset();
+    loadFiles();
+  } catch (error) {
+    showMessage(error.message, "err");
+  }
+});
+
+async function loadFiles() {
+  const list = document.getElementById("files");
+  list.innerHTML = "<li>Loading...</li>";
+  try {
+    const response = await api("/api/files?department=" + encodeURIComponent(department));
+    const data = await response.json();
+    list.innerHTML = "";
+    if (!data.files.length) {
+      list.innerHTML = "<li>No files found for this department.</li>";
+      return;
+    }
+    for (const filename of data.files) {
+      const li = document.createElement("li");
+      const label = document.createElement("span");
+      label.textContent = filename + " ";
+      const button = document.createElement("button");
+      button.textContent = "Download";
+      button.addEventListener("click", () => downloadFile(filename));
+      li.appendChild(label);
+      li.appendChild(button);
+      list.appendChild(li);
+    }
+    showMessage("File list refreshed. Storage servers responding: " + data.replica_servers_checked);
+  } catch (error) {
+    list.innerHTML = "";
+    showMessage(error.message, "err");
+  }
+}
+async function downloadFile(filename) {
+  try {
+    const response = await api("/api/download?department=" + encodeURIComponent(department) + "&filename=" + encodeURIComponent(filename));
+    const blob = await response.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+    showMessage("Download started: " + filename);
+  } catch (error) {
+    showMessage(error.message, "err");
+  }
+}
+document.getElementById("refresh").addEventListener("click", loadFiles);
+
+document.getElementById("health").addEventListener("click", async () => {
+  try {
+    const response = await fetch("/api/health");
+    const data = await response.json();
+    document.getElementById("status").textContent = "Coordinator: " + data.coordinator + "\n" +
+      data.storage_servers.map(s => s.server + " — " + s.status).join("\n");
+  } catch (error) {
+    showMessage("Could not check server status: " + error.message, "err");
+  }
+});
+
+document.getElementById("logout").addEventListener("click", async () => {
+  try { await api("/api/logout", {method: "POST"}); } catch (_) {}
+  token = "";
+  department = "";
+  document.getElementById("app").style.display = "none";
+  document.getElementById("login").style.display = "block";
+  document.getElementById("status").textContent = "";
+  showMessage("You have logged out.");
+});
+</script>
+</body>
+</html>
