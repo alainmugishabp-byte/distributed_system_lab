@@ -1,3 +1,4 @@
+
 import urllib.request
 import json
 
@@ -9,33 +10,34 @@ SERVERS = [
 ]
 
 
-def contact_server(server):
+def contact_server(server_url):
 
-    print(f"\nConnecting to {server}")
+    print(f"\nConnecting to {server_url}")
 
     try:
-
-        with urllib.request.urlopen(server) as response:
-
+        with urllib.request.urlopen(server_url, timeout=10) as response:
             data = response.read().decode("utf-8")
-
             result = json.loads(data)
 
-            print(f"Status: {response.status}")
-            print(f"Server: {result['server']}")
-            print(f"Port:   {result['port']}")
-            print(f"Status: {result['status']}")
+            print(f"HTTP Status: {response.status}")
+            print(f"Server:      {result['server']}")
+            print(f"Port:        {result['port']}")
+            print(f"Status:      {result['status']}")
+            print(f"Message:     {result['message']}")
+            print(f"Time:        {result['time']}")
 
     except Exception as error:
-
-        print(f"ERROR: Could not contact {server}")
+        print(f"ERROR: Could not contact {server_url}")
         print(f"Reason: {error}")
 
 
-print("================================")
-print("Distributed Systems Client")
-print("================================")
+print("=======================================")
+print("   DISTRIBUTED SYSTEMS CLIENT")
+print("=======================================")
 
-for server in SERVERS:
+for server_url in SERVERS:
+    contact_server(server_url)
 
-    contact_server(server)
+print("\n=======================================")
+print("Client finished contacting all servers.")
+print("=======================================")
